@@ -128,20 +128,13 @@ class TorchMLP(nn.Module):
         self,
         network_config=None,
         input_shape=10,
-        **kwargs,
-        ):
+        train_output_type="logprob",  # 'logprob', 'logits',
+    ):
         super(TorchMLP, self).__init__()
 
         self.input_shape = input_shape
         self.network_config = network_config
-        
-        if 'train_output_type' in self.network_config.keys():
-            self.train_output_type = self.network_config['train_output_type']
-        else:
-            self.train_output_type = 'logprob'
-
-        self.network_type = "lan" if self.train_output_type == "logprob" else "cpn"
-
+        self.train_output_type = train_output_type
         self.activations = {
             "relu": torch.nn.ReLU(),
             "tanh": torch.nn.Tanh(),
@@ -202,6 +195,7 @@ class TorchMLP(nn.Module):
         else:
             return self.layers[-1](x)
 
+
 class ModelTrainerTorchMLP:
     def __init__(
         self,
@@ -257,15 +251,15 @@ class ModelTrainerTorchMLP:
                 # },
             )
 
-            # wandb.config = {
-            #     "learning_rate": self.train_config["learning_rate"],
-            #     "weight_decay": self.train_config["weight_decay"],
-            #     "epochs": self.train_config["n_epochs"],
-            #     "batch_size": self.train_config["gpu_batch_size"]
-            #     if torch.cuda.is_available()
-            #     else self.train_config["cpu_batch_size"],
-            #     "model_id": self.model.model_id,
-            # }
+            wandb.config = {
+                "learning_rate": self.train_config["learning_rate"],
+                "weight_decay": self.train_config["weight_decay"],
+                "epochs": self.train_config["n_epochs"],
+                "batch_size": self.train_config["gpu_batch_size"]
+                if torch.cuda.is_available()
+                else self.train_config["cpu_batch_size"],
+                "model_id": self.model.model_id,
+            }
 
             print("Succefully initialized wandb!")
         except:
@@ -350,7 +344,6 @@ class ModelTrainerTorchMLP:
         save_data_details=True,
         verbose=1,
     ):
-        
         try_gen_folder(
             folder=output_folder,
             allow_abs_path_folder_generation=self.allow_abs_path_folder_generation,
@@ -361,19 +354,7 @@ class ModelTrainerTorchMLP:
                 wandb_project_id=wandb_project_id, file_id=output_file_id, run_id=run_id
             )
 
-        # Identify network type:
-        if self.model.train_output_type == "logprob":
-            network_type = "lan"
-        elif self.model.train_output_type == "logits":
-            network_type = "cpn"
-        else:
-            network_type = "unknown"
-            print(
-                'Model type identified as "unknown" because the training_output_type attribute'
-                + ' of the supplied jax model is neither "logprob", nor "logits"'
-            )
-
-        training_history = pd.DataFrame(
+        self.training_history = pd.DataFrame(
             np.zeros((self.train_config["n_epochs"], 2)), columns=["epoch", "val_loss"]
         )
 
@@ -456,7 +437,7 @@ class ModelTrainerTorchMLP:
                 elif self.train_config["lr_scheduler"] == "multiply":
                     self.scheduler.step()
 
-            training_history.values[epoch, :] = [epoch, val_loss.cpu()]
+            self.training_history.values[epoch, :] = [epoch, val_loss.cpu()]
 
             # Log wandb if possible
             try:
@@ -467,14 +448,13 @@ class ModelTrainerTorchMLP:
 
         # Saving
         full_path = (
-            output_folder + "/" + output_file_id + "_" + network_type + "_" + run_id
+            output_folder + "/" + output_file_id + "_" + self.model_type + "_" + run_id
         )
 
         if save_history or save_all:
             print("Saving training history")
             training_history_path = full_path + "_torch_training_history.csv"
-            pd.DataFrame(training_history).to_csv(training_history_path)
-            print("Saving training history to: " + training_history_path)
+            pd.DataFrame(self.training_history).to_csv(training_history_path)
 
         if save_model or save_all:
             print("Saving model state dict")
@@ -483,20 +463,17 @@ class ModelTrainerTorchMLP:
                 self.model.state_dict(),
                 train_state_path,
             )
-            print("Saving model parameters to: " + train_state_path)
-
 
         if save_config or save_all:
             config_path = full_path + "_train_config.pickle"
-            pickle.dump(self.train_config, open(config_path, "wb"))
-            print("Saving training config to: " + config_path)
+            pickle.dump(self.config, open(config_path, "wb"))
 
         if save_data_details or save_all:
             data_details_path = full_path + "_data_details.pickle"
             pickle.dump(
                 {
                     "train_data_generator_config": self.train_dl.dataset.data_generator_config,
-                    "train_datafile_ids": self.train_dl.dataset.file_ids,
+                    "train_datafile_ids": self.train_dl.dataet.file_ids,
                     "valid_data_generator_config": self.valid_dl.dataset.data_generator_config,
                     "valid_datafile_ids": self.valid_dl.dataset.file_ids,
                 },
@@ -513,6 +490,7 @@ class ModelTrainerTorchMLP:
             pass
 
         print("Training finished successfully...")
+
 
 class LoadTorchMLPInfer:
     def __init__(self, model_file_path=None, network_config=None, input_dim=None):

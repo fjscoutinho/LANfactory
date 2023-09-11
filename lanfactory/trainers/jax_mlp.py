@@ -17,8 +17,6 @@ from flax.training import train_state
 from flax import linen as nn
 import optax
 
-from time import time
-
 try:
     import wandb
 except:
@@ -31,7 +29,8 @@ def MLPJaxFactory(network_config={}, train=True):
         activations=network_config["activations"],
         train_output_type=network_config["train_output_type"],
         train=train,
-        )
+    )
+
 
 class MLPJax(nn.Module):
     layer_sizes: Sequence[int] = (100, 90, 80, 1)
@@ -42,9 +41,6 @@ class MLPJax(nn.Module):
         {"relu": nn.relu, "tanh": nn.tanh, "sigmoid": nn.sigmoid}
     )
 
-    # Define network type
-    network_type = "lan" if train_output_type == "logprob" else "cpn"
-
     def setup(self):
         # TODO: Warn if unknown activation string used
         # TODO: Warn if linear activation is used before final layer
@@ -54,9 +50,6 @@ class MLPJax(nn.Module):
             for activation in self.activations
             if (activation != "linear")
         ]
-
-        # Identification
-        #self.network_type = "lan" if self.train_output_type == "logprob" else "cpn"
 
     def __call__(self, inputs):
         x = inputs
@@ -176,15 +169,7 @@ class ModelTrainerJaxMLP:
         self.model = model
         self.train_dl = train_dl
         self.valid_dl = valid_dl
-        self.pin_memory = pin_memory
-        
-        if seed is None:
-            self.seed = int(np.random.choice(4000000000))
-        else:
-            self.seed = seed
-        self.allow_abs_path_folder_generation = allow_abs_path_folder_generation
-        self.wandb_on = 0
-
+        self.seed = seed
 
         self.__get_loss()
         self.apply_model_train = self.__make_apply_model(train=True)
@@ -231,22 +216,23 @@ class ModelTrainerJaxMLP:
     def __try_wandb(
         self, wandb_project_id="projectid", file_id="fileid", run_id="runid"
     ):
-        try:
-            wandb.init(
-                project=wandb_project_id,
-                name=(
-                    "wd_"
-                    + str(self.train_config["weight_decay"])
-                    + "_optim_"
-                    + str(self.train_config["optimizer"])
-                    + "_"
-                    + run_id
-                ),
-                config=self.train_config,
-            )
-            self.wandb_on = 1
-        except:
-            print("No wandb found, proceeding without logging")
+        # Initialize wandb
+        if self.wandb_on:
+            try:
+                wandb.init(
+                    project=wandb_project_id,
+                    name=(
+                        "wd_"
+                        + str(self.train_config["weight_decay"])
+                        + "_optim_"
+                        + str(self.train_config["optimizer"])
+                        + "_"
+                        + run_id
+                    ),
+                    config=self.train_config,
+                )
+            except:
+                print("No wandb found, proceeding without logging")
 
     def create_train_state(self, rng):
         params = self.model.init(
@@ -259,30 +245,22 @@ class ModelTrainerJaxMLP:
             decay_steps=self.train_dl.dataset.__len__() * self.train_config["n_epochs"],
             end_value=self.lr_dict["end_value"],
         )
+        # tx = optax.adam(learning_rate = self.train_config['learning_rate'])
         tx = optax.adam(learning_rate=lr_schedule)
         return train_state.TrainState.create(
             apply_fn=self.model.apply, params=params, tx=tx
         )
 
-    def run_epoch(self, state, train=True, verbose=1, epoch=0, max_epochs=0):
+    def run_epoch(self, state, train=True):
         if train:
             tmp_dataloader = self.train_dl
-            train_str = "Training"
         else:
             tmp_dataloader = self.valid_dl
-            train_str = "Validation"
 
         epoch_loss = []
-        
-        cnt_max = tmp_dataloader.__len__() # total steps per epoch
-        
-        # Run training for one epoch
-        start_time = time()
-        step = 0
-        for X, y in tmp_dataloader:
+        for X, y in tqdm(tmp_dataloader):
             X_jax = jnp.array(X)
             y_jax = jnp.array(y)
-            
             if train:
                 grads, loss = self.apply_model_train(state, X_jax, y_jax)
                 state = self.update_model(state, grads)
@@ -290,49 +268,13 @@ class ModelTrainerJaxMLP:
                 loss = self.apply_model_eval(state, X_jax, y_jax)
 
             epoch_loss.append(loss)
-            
-            # Log wandb and print progress if verbose
-            if (step % 100) == 0:
+
+            if (int(state.step) % 100) == 0:
                 if self.wandb_on:
                     try:
                         wandb.log({"loss": loss}, step=int(state.step))
                     except:
                         pass
-                if verbose == 2:
-                    print(
-                        train_str 
-                        + " - Step: "
-                        + str(step)
-                        + " of "
-                        + str(cnt_max)
-                        + " - Loss: "
-                        + str(loss)
-                    )
-                elif verbose == 1:
-                    if (step % 1000) == 0:
-                        print(
-                            train_str 
-                            + " - Step: "
-                            + str(step)
-                            + " of "
-                            + str(cnt_max)
-                            + " - Loss: "
-                            + str(loss)
-                        )
-                else:
-                    pass
-
-            step += 1
-        
-        end_time = time()
-        print("Epoch " 
-              + str(epoch) 
-              + "/" 
-              + str(max_epochs) 
-              + " time: " 
-              + str(end_time- start_time)
-              + "s"
-             )
 
         mean_epoch_loss = np.mean(epoch_loss)
         return state, mean_epoch_loss
@@ -351,12 +293,6 @@ class ModelTrainerJaxMLP:
         save_data_details=True,
         verbose=1,
     ):
-        
-        try_gen_folder(
-            folder=output_folder,
-            allow_abs_path_folder_generation=self.allow_abs_path_folder_generation,
-            )  # AF-TODO import folder
-
         if wandb_on:
             self.__try_wandb(
                 wandb_project_id=wandb_project_id, file_id=output_file_id, run_id=run_id
@@ -364,11 +300,11 @@ class ModelTrainerJaxMLP:
 
         # Identify network type:
         if self.model.train_output_type == "logprob":
-            network_type = "lan"
+            model_type = "lan"
         elif self.model.train_output_type == "logits":
-            network_type = "cpn"
+            model_type = "cpn"
         else:
-            network_type = "unknown"
+            model_type = "unknown"
             print(
                 'Model type identified as "unknown" because the training_output_type attribute'
                 + ' of the supplied jax model is neither "logprob", nor "logits"'
@@ -393,18 +329,8 @@ class ModelTrainerJaxMLP:
 
         # Training loop over epochs
         for epoch in range(self.train_config["n_epochs"]):
-            print("Epoch: " + str(epoch) + " of " + str(self.train_config["n_epochs"]))
-            state, train_loss = self.run_epoch(state, 
-                                               train=True, 
-                                               verbose=verbose, 
-                                               epoch=epoch, 
-                                               max_epochs=self.train_config["n_epochs"])
-            
-            state, test_loss = self.run_epoch(state, 
-                                              train=False, 
-                                              verbose=verbose,
-                                              epoch=epoch,
-                                              max_epochs=self.train_config["n_epochs"])
+            state, train_loss = self.run_epoch(state, train=True)
+            state, test_loss = self.run_epoch(state, train=False)
 
             # Collect loss in training history
             training_history.values[epoch, :] = [int(epoch), float(test_loss)]
@@ -420,7 +346,8 @@ class ModelTrainerJaxMLP:
         self.state = state
 
         # Saving
-        full_path = (output_folder + "/" + run_id + "_" + network_type + "_" + output_file_id + "_"
+        full_path = (
+            output_folder + "/" + output_file_id + "_" + model_type + "_" + run_id
         )
 
         if save_history or save_all:
@@ -445,7 +372,7 @@ class ModelTrainerJaxMLP:
             print("Saving training config to: " + config_path)
 
         if save_data_details or save_all:
-            data_details_path = full_path + "_data_details.pickle"
+            data_details_path = full_path + "data_details.pickle"
             pickle.dump(
                 {
                     "train_data_generator_config": self.train_dl.dataset.data_generator_config,
